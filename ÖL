@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
 oil_price_forecast.py
-Professional, calm, robust oil forecast (WTI + Brent)
-
-Logic:
-- Yahoo Finance only
-- Trend + momentum model
-- Trade only if probability >= threshold
+Calm, robust, professional oil forecast (WTI + Brent)
+Yahoo Finance only
 """
 
 import json
@@ -14,146 +10,109 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import yfinance as yf
-
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
 
-# ======================
+# =========================
 # CONFIG
-# ======================
+# =========================
 START_DATE = "2012-01-01"
-WTI_SYMBOL = "CL=F"
-BRENT_SYMBOL = "BZ=F"
 
-PROB_THRESHOLD = 0.57   # trade only above this
-OUTPUT_TXT = "oil_forecast_output.txt"
-OUTPUT_JSON = "oil_forecast_output.json"
+SYMBOL_WTI = "CL=F"
+SYMBOL_BRENT = "BZ=F"
 
-# ======================
-# LOAD DATA
-# ======================
-def load_prices():
-    wti = yf.download(WTI_SYMBOL, start=START_DATE, progress=False)["Close"]
-    brent = yf.download(BRENT_SYMBOL, start=START_DATE, progress=False)["Close"]
+PROB_THRESHOLD = 0.57
+OUTPUT_TXT = "oil_forecast.txt"
 
-    df = pd.concat([wti, brent], axis=1)
-    df.columns = ["WTI_Close", "Brent_Close"]
-    df.dropna(inplace=True)
-    return df
+# =========================
+# HELPERS
+# =========================
+def fetch_price(symbol):
+    df = yf.download(symbol, start=START_DATE, progress=False)
+    df = df[["Close"]].rename(columns={"Close": symbol})
+    return df.dropna()
 
-# ======================
-# FEATURES
-# ======================
 def build_features(df):
     df = df.copy()
 
-    df["WTI_Return"] = df["WTI_Close"].pct_change()
-    df["Brent_Return"] = df["Brent_Close"].pct_change()
+    df["Return"] = df.iloc[:, 0].pct_change()
+    df["Momentum_5"] = df.iloc[:, 0].pct_change(5)
+    df["Momentum_10"] = df.iloc[:, 0].pct_change(10)
+    df["Volatility_5"] = df["Return"].rolling(5).std()
+    df["SMA_50"] = df.iloc[:, 0].rolling(50).mean()
 
-    for lag in range(1, 6):
-        df[f"WTI_lag{lag}"] = df["WTI_Return"].shift(lag)
-        df[f"Brent_lag{lag}"] = df["Brent_Return"].shift(lag)
+    df["Target"] = (df["Return"].shift(-1) > 0).astype(int)
 
-    df["Momentum_10"] = df["WTI_Close"].pct_change(10).shift(1)
-    df["Volatility_5"] = df["WTI_Return"].rolling(5).std().shift(1)
-
-    # Target: next day up/down
-    df["Target"] = (df["WTI_Return"].shift(-1) > 0).astype(int)
-
-    df.dropna(inplace=True)
+    df = df.dropna()
     return df
 
-# ======================
-# MODEL
-# ======================
-def train_model(df, features):
+def train_model(df):
+    features = ["Return", "Momentum_5", "Momentum_10", "Volatility_5"]
     X = df[features]
     y = df["Target"]
 
-    tscv = TimeSeriesSplit(n_splits=5)
-    scores = []
-
-    for train, test in tscv.split(X):
-        model = RandomForestClassifier(
-            n_estimators=300,
-            max_depth=6,
-            min_samples_leaf=5,
-            random_state=42
-        )
-        model.fit(X.iloc[train], y.iloc[train])
-        pred = model.predict(X.iloc[test])
-        scores.append(accuracy_score(y.iloc[test], pred))
-
-    final_model = RandomForestClassifier(
+    model = RandomForestClassifier(
         n_estimators=300,
         max_depth=6,
-        min_samples_leaf=5,
+        min_samples_leaf=10,
         random_state=42
     )
-    final_model.fit(X, y)
+    model.fit(X, y)
+    return model, features
 
-    return final_model, np.mean(scores), np.std(scores)
-
-# ======================
-# OUTPUT
-# ======================
-def write_output(result):
-    lines = [
-        "===================================",
-        "      OIL PRICE FORECAST",
-        "===================================",
-        f"Run time (UTC): {result['run_time']}",
-        f"Data date     : {result['data_date']}",
-        "",
-        f"WTI Close     : {result['WTI_Close']:.2f}",
-        f"Brent Close   : {result['Brent_Close']:.2f}",
-        "",
-        f"Prob UP       : {result['prob_up']:.2%}",
-        f"Signal        : {result['signal']}",
-        f"Confidence    : {result['confidence']:.2%}",
-        "",
-        f"Model CV      : {result['cv_mean']:.2%} ± {result['cv_std']:.2%}",
-        "===================================",
-    ]
-
-    with open(OUTPUT_TXT, "w") as f:
-        f.write("\n".join(lines))
-
-    with open(OUTPUT_JSON, "w") as f:
-        json.dump(result, f, indent=2)
-
-# ======================
+# =========================
 # MAIN
-# ======================
-def main():
-    prices = load_prices()
-    df = build_features(prices)
+# =========================
+def run_forecast(symbol, name):
+    df_raw = fetch_price(symbol)
+    df = build_features(df_raw)
 
-    features = [c for c in df.columns if c not in ("Target", "WTI_Close", "Brent_Close")]
-
-    model, cv_mean, cv_std = train_model(df, features)
+    model, features = train_model(df)
 
     last = df.iloc[-1:]
     prob_up = model.predict_proba(last[features])[0][1]
 
+    price = float(df_raw.iloc[-1, 0])
+    sma50 = float(df["SMA_50"].iloc[-1])
+
+    trend_ok = price > sma50
     signal = "NO_TRADE"
-    if prob_up >= PROB_THRESHOLD:
+
+    if prob_up >= PROB_THRESHOLD and trend_ok:
         signal = "LONG"
 
-    result = {
-        "run_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "data_date": last.index[0].date().isoformat(),
-        "WTI_Close": float(last["WTI_Close"]),
-        "Brent_Close": float(last["Brent_Close"]),
-        "prob_up": float(prob_up),
-        "signal": signal,
-        "confidence": float(prob_up),
-        "cv_mean": float(cv_mean),
-        "cv_std": float(cv_std),
+    return {
+        "instrument": name,
+        "price": round(price, 2),
+        "prob_up": round(prob_up * 100, 2),
+        "trend": "UP" if trend_ok else "DOWN",
+        "signal": signal
     }
 
-    write_output(result)
+def main():
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    wti = run_forecast(SYMBOL_WTI, "WTI")
+    brent = run_forecast(SYMBOL_BRENT, "BRENT")
+
+    lines = []
+    lines.append("===================================")
+    lines.append("        OIL PRICE FORECAST")
+    lines.append("===================================")
+    lines.append(f"Run time (UTC): {now}")
+    lines.append("")
+
+    for r in (wti, brent):
+        lines.append(f"{r['instrument']}")
+        lines.append(f"Price        : {r['price']}")
+        lines.append(f"Prob UP      : {r['prob_up']}%")
+        lines.append(f"Trend        : {r['trend']}")
+        lines.append(f"Signal       : {r['signal']}")
+        lines.append("-----------------------------------")
+
+    with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print("[OK] Forecast written to", OUTPUT_TXT)
 
 if __name__ == "__main__":
     main()
