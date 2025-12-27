@@ -1,19 +1,18 @@
-name: Gas Forecast
+name: Run Forecast
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 14 * * *"   # täglich 14:30 UTC
+    - cron: "30 13 * * *"   # täglich 14:30 MEZ (13:30 UTC)
 
 jobs:
-  run:
+  forecast:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -25,4 +24,3 @@ jobs:
       - name: Run forecast
         run: |
           python gas_price_forecast.py
-
