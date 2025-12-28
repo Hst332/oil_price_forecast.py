@@ -1,144 +1,176 @@
 #!/usr/bin/env python3
 """
 oil_price_forecast.py
-Ruhiger, robuster Öl-Forecast (Brent + WTI)
-A-Variante: Trend + Wahrscheinlichkeit
+CODE A – Clean, robust Brent/WTI forecast
+
+- Data: Yahoo Finance (WTI + Brent)
+- Features: returns, lags, Brent–WTI spread
+- Simple RandomForest
+- Trend filter
+- TXT output (overwritten every run)
 """
 
-import yfinance as yf
-import pandas as pd
-import numpy as np
+import json
 from datetime import datetime
+import numpy as np
+import pandas as pd
+import yfinance as yf
 
-# -----------------------
-# Config
-# -----------------------
-START_DATE = "2010-01-01"
-SYMBOL_BRENT = "BZ=F"   # Brent Crude
-SYMBOL_WTI   = "CL=F"   # WTI Crude
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import accuracy_score
+
+# ======================
+# CONFIG
+# ======================
+WTI_SYMBOL = "CL=F"
+BRENT_SYMBOL = "BZ=F"
+START_DATE = "2015-01-01"
+
+OUTPUT_TXT = "oil_forecast_output.txt"
 
 PROB_TRADE_THRESHOLD = 0.57
-OUTPUT_FILE = "oil_forecast_output.txt"
+MIN_ROWS = 250
 
-# -----------------------
-# Load prices
-# -----------------------
+# ======================
+# DATA LOADING
+# ======================
 def load_prices():
-    brent = yf.download(SYMBOL_BRENT, start=START_DATE, progress=False)["Close"]
-    wti   = yf.download(SYMBOL_WTI, start=START_DATE, progress=False)["Close"]
+    wti = yf.download(WTI_SYMBOL, start=START_DATE, progress=False, auto_adjust=True)
+    brent = yf.download(BRENT_SYMBOL, start=START_DATE, progress=False, auto_adjust=True)
 
-    df = pd.concat([brent, wti], axis=1)
-    df.columns = ["Brent_Close", "WTI_Close"]
-    df = df.dropna()
+    if wti.empty or brent.empty:
+        raise RuntimeError("Yahoo returned empty data")
 
+    wti = wti[["Close"]].rename(columns={"Close": "WTI_Close"})
+    brent = brent[["Close"]].rename(columns={"Close": "Brent_Close"})
+
+    df = wti.join(brent, how="inner")
+    df = df.dropna().sort_index()
     return df
 
-# -----------------------
-# Feature engineering
-# -----------------------
+# ======================
+# FEATURES
+# ======================
 def build_features(df):
-    out = df.copy()
+    df = df.copy()
 
-    # Returns
-    out["Brent_Return"] = out["Brent_Close"].pct_change()
-    out["WTI_Return"]   = out["WTI_Close"].pct_change()
+    df["WTI_Return"] = df["WTI_Close"].pct_change()
+    df["Brent_Return"] = df["Brent_Close"].pct_change()
 
-    # Trend filter
-    out["Brent_SMA50"] = out["Brent_Close"].rolling(50).mean()
-    out["WTI_SMA50"]   = out["WTI_Close"].rolling(50).mean()
+    df["Spread"] = df["Brent_Close"] - df["WTI_Close"]
+    df["Spread_Change"] = df["Spread"].diff()
 
-    # Trend regime
-    out["Brent_Trend_Up"] = (out["Brent_Close"] > out["Brent_SMA50"]).astype(int)
-    out["WTI_Trend_Up"]   = (out["WTI_Close"] > out["WTI_SMA50"]).astype(int)
+    for l in range(1, 6):
+        df[f"WTI_Return_lag{l}"] = df["WTI_Return"].shift(l)
+        df[f"Spread_Change_lag{l}"] = df["Spread_Change"].shift(l)
 
-    out = out.dropna()
-    return out
+    # Target: next day direction (WTI)
+    df["Target"] = (df["WTI_Return"].shift(-1) > 0).astype(int)
 
-# -----------------------
-# Probability logic (robust, explainable)
-# -----------------------
-def compute_probability(df):
-    last = df.iloc[-1]
+    df = df.dropna()
+    return df
 
-    score = 0.5
+# ======================
+# MODEL
+# ======================
+def train_model(df, features):
+    X = df[features]
+    y = df["Target"]
 
-    # Trend alignment
-    if last["Brent_Trend_Up"]:
-        score += 0.06
-    else:
-        score -= 0.06
+    tscv = TimeSeriesSplit(n_splits=5)
+    scores = []
 
-    if last["WTI_Trend_Up"]:
-        score += 0.06
-    else:
-        score -= 0.06
+    for train_idx, test_idx in tscv.split(X):
+        model = RandomForestClassifier(
+            n_estimators=300,
+            max_depth=6,
+            min_samples_leaf=5,
+            random_state=42,
+        )
+        model.fit(X.iloc[train_idx], y.iloc[train_idx])
+        preds = model.predict(X.iloc[test_idx])
+        scores.append(accuracy_score(y.iloc[test_idx], preds))
 
-    # Momentum confirmation
-    if last["Brent_Return"] > 0:
-        score += 0.03
-    if last["WTI_Return"] > 0:
-        score += 0.03
+    final_model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=6,
+        min_samples_leaf=5,
+        random_state=42,
+    )
+    final_model.fit(X, y)
 
-    return max(0.0, min(1.0, score))
+    return final_model, float(np.mean(scores)), float(np.std(scores))
 
-# -----------------------
-# Output
-# -----------------------
-def write_output(result):
+# ======================
+# OUTPUT
+# ======================
+def write_txt(result):
     lines = []
     lines.append("===================================")
-    lines.append("        OIL PRICE FORECAST")
+    lines.append("   OIL FORECAST – BRENT / WTI")
     lines.append("===================================")
     lines.append(f"Run time (UTC): {result['run_time']}")
     lines.append(f"Data date     : {result['data_date']}")
     lines.append("")
-    lines.append("Sources:")
-    lines.append("  Brent : Yahoo Finance (BZ=F)")
-    lines.append("  WTI   : Yahoo Finance (CL=F)")
+    lines.append(f"Model CV      : {result['cv_mean']:.2%} ± {result['cv_std']:.2%}")
     lines.append("")
-    lines.append(f"Brent Close : {result['brent_close']:.2f}")
-    lines.append(f"WTI Close   : {result['wti_close']:.2f}")
-    lines.append("")
-    lines.append(f"Probability UP : {result['prob_up']:.2%}")
+    lines.append(f"Prob UP       : {result['prob_up']:.2%}")
+    lines.append(f"Prob DOWN     : {result['prob_down']:.2%}")
     lines.append(f"Signal        : {result['signal']}")
     lines.append("===================================")
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    print("\n".join(lines))
-
-# -----------------------
-# Main
-# -----------------------
+# ======================
+# MAIN
+# ======================
 def main():
-    df = load_prices()
-    df = build_features(df)
+    df_prices = load_prices()
+    df = build_features(df_prices)
 
-    prob_up = compute_probability(df)
+    if len(df) < MIN_ROWS:
+        raise RuntimeError("Not enough data")
 
-    signal = (
-        "TRADE"
-        if prob_up >= PROB_TRADE_THRESHOLD
-        else "NO_TRADE"
+    feature_cols = [
+        c for c in df.columns
+        if c.startswith("WTI_Return_lag") or c.startswith("Spread_Change_lag")
+    ]
+
+    model, cv_mean, cv_std = train_model(df, feature_cols)
+
+    last = df.iloc[-1:]
+    prob_up = float(model.predict_proba(last[feature_cols])[0][1])
+    prob_down = 1.0 - prob_up
+
+    # Trend filter (WTI)
+    trend_up = (
+        df["WTI_Close"].iloc[-1]
+        > df["WTI_Close"].rolling(50).mean().iloc[-1]
     )
 
-    last = df.iloc[-1]
+    if prob_up >= PROB_TRADE_THRESHOLD and trend_up:
+        signal = "UP"
+    elif prob_down >= PROB_TRADE_THRESHOLD and not trend_up:
+        signal = "DOWN"
+    else:
+        signal = "NO_TRADE"
 
     result = {
         "run_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "data_date": last.name.date().isoformat(),
-        "brent_close": last["Brent_Close"],
-        "wti_close": last["WTI_Close"],
+        "data_date": df.index[-1].date().isoformat(),
         "prob_up": prob_up,
+        "prob_down": prob_down,
         "signal": signal,
+        "cv_mean": cv_mean,
+        "cv_std": cv_std,
     }
 
-    write_output(result)
+    write_txt(result)
 
-# -----------------------
-# Entrypoint
-# -----------------------
+# ======================
+# ENTRYPOINT
+# ======================
 if __name__ == "__main__":
     main()
-
