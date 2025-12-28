@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
 oil_price_forecast.py
-Ruhige, robuste Go-Live Version (A)
-
-- Brent (BZ=F) & WTI (CL=F) von Yahoo Finance
-- Einfaches Trend- + Momentum-Modell
-- Saubere Wahrscheinlichkeitslogik
-- Signal nur bei klarer Edge
+Ruhiger, robuster Öl-Forecast (Brent + WTI)
+A-Variante: Trend + Wahrscheinlichkeit
 """
 
 import yfinance as yf
@@ -14,115 +10,135 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# =====================
-# CONFIG
-# =====================
+# -----------------------
+# Config
+# -----------------------
 START_DATE = "2010-01-01"
-BRENT_SYMBOL = "BZ=F"
-WTI_SYMBOL = "CL=F"
-PROB_THRESHOLD = 0.57
+SYMBOL_BRENT = "BZ=F"   # Brent Crude
+SYMBOL_WTI   = "CL=F"   # WTI Crude
 
+PROB_TRADE_THRESHOLD = 0.57
 OUTPUT_FILE = "oil_forecast_output.txt"
 
-# =====================
-# LOAD DATA
-# =====================
+# -----------------------
+# Load prices
+# -----------------------
 def load_prices():
-    brent = yf.download(BRENT_SYMBOL, start=START_DATE, progress=False)
-    wti   = yf.download(WTI_SYMBOL, start=START_DATE, progress=False)
+    brent = yf.download(SYMBOL_BRENT, start=START_DATE, progress=False)["Close"]
+    wti   = yf.download(SYMBOL_WTI, start=START_DATE, progress=False)["Close"]
 
-    if brent.empty or wti.empty:
-        raise RuntimeError("Yahoo returned no data")
-
-    df = pd.DataFrame({
-        "Brent": brent["Close"],
-        "WTI": wti["Close"]
-    }).dropna()
+    df = pd.concat([brent, wti], axis=1)
+    df.columns = ["Brent_Close", "WTI_Close"]
+    df = df.dropna()
 
     return df
 
-# =====================
-# FEATURE ENGINEERING
-# =====================
+# -----------------------
+# Feature engineering
+# -----------------------
 def build_features(df):
-    df = df.copy()
+    out = df.copy()
 
-    df["Brent_ret"] = df["Brent"].pct_change()
-    df["WTI_ret"] = df["WTI"].pct_change()
+    # Returns
+    out["Brent_Return"] = out["Brent_Close"].pct_change()
+    out["WTI_Return"]   = out["WTI_Close"].pct_change()
 
-    df["Momentum_5"] = df["Brent"].pct_change(5)
-    df["SMA_50"] = df["Brent"].rolling(50).mean()
-    df["Trend"] = (df["Brent"] > df["SMA_50"]).astype(int)
+    # Trend filter
+    out["Brent_SMA50"] = out["Brent_Close"].rolling(50).mean()
+    out["WTI_SMA50"]   = out["WTI_Close"].rolling(50).mean()
 
-    df["Target"] = (df["Brent_ret"].shift(-1) > 0).astype(int)
+    # Trend regime
+    out["Brent_Trend_Up"] = (out["Brent_Close"] > out["Brent_SMA50"]).astype(int)
+    out["WTI_Trend_Up"]   = (out["WTI_Close"] > out["WTI_SMA50"]).astype(int)
 
-    return df.dropna()
+    out = out.dropna()
+    return out
 
-# =====================
-# MODEL (LOGIC A)
-# =====================
-def compute_probability(row):
-    prob = 0.5
-
-    if row["Momentum_5"] > 0:
-        prob += 0.06
-    else:
-        prob -= 0.06
-
-    if row["Trend"] == 1:
-        prob += 0.05
-    else:
-        prob -= 0.05
-
-    return max(0.0, min(1.0, prob))
-
-# =====================
-# MAIN
-# =====================
-def main():
-    df = load_prices()
-    df = build_features(df)
-
+# -----------------------
+# Probability logic (robust, explainable)
+# -----------------------
+def compute_probability(df):
     last = df.iloc[-1]
-    prob_up = compute_probability(last)
-    prob_down = 1 - prob_up
 
-    signal = "NO_TRADE"
-    if prob_up >= PROB_THRESHOLD:
-        signal = "UP"
-    elif prob_down >= PROB_THRESHOLD:
-        signal = "DOWN"
+    score = 0.5
 
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    # Trend alignment
+    if last["Brent_Trend_Up"]:
+        score += 0.06
+    else:
+        score -= 0.06
 
+    if last["WTI_Trend_Up"]:
+        score += 0.06
+    else:
+        score -= 0.06
+
+    # Momentum confirmation
+    if last["Brent_Return"] > 0:
+        score += 0.03
+    if last["WTI_Return"] > 0:
+        score += 0.03
+
+    return max(0.0, min(1.0, score))
+
+# -----------------------
+# Output
+# -----------------------
+def write_output(result):
     lines = []
     lines.append("===================================")
-    lines.append("      OIL PRICE FORECAST (A)")
+    lines.append("        OIL PRICE FORECAST")
     lines.append("===================================")
-    lines.append(f"Run time (UTC): {now}")
-    lines.append(f"Data date     : {df.index[-1].date()}")
+    lines.append(f"Run time (UTC): {result['run_time']}")
+    lines.append(f"Data date     : {result['data_date']}")
     lines.append("")
     lines.append("Sources:")
-    lines.append(f"  Brent : Yahoo {BRENT_SYMBOL}")
-    lines.append(f"  WTI   : Yahoo {WTI_SYMBOL}")
+    lines.append("  Brent : Yahoo Finance (BZ=F)")
+    lines.append("  WTI   : Yahoo Finance (CL=F)")
     lines.append("")
-    lines.append(f"Brent Close : {last['Brent']:.2f}")
-    lines.append(f"WTI Close   : {last['WTI']:.2f}")
+    lines.append(f"Brent Close : {result['brent_close']:.2f}")
+    lines.append(f"WTI Close   : {result['wti_close']:.2f}")
     lines.append("")
-    lines.append(f"Probability UP   : {prob_up:.2%}")
-    lines.append(f"Probability DOWN : {prob_down:.2%}")
-    lines.append("")
-    lines.append(f"Signal : {signal}")
+    lines.append(f"Probability UP : {result['prob_up']:.2%}")
+    lines.append(f"Signal        : {result['signal']}")
     lines.append("===================================")
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
     print("\n".join(lines))
-    print(f"\n[OK] Written to {OUTPUT_FILE}")
 
-# =====================
-# ENTRYPOINT
-# =====================
+# -----------------------
+# Main
+# -----------------------
+def main():
+    df = load_prices()
+    df = build_features(df)
+
+    prob_up = compute_probability(df)
+
+    signal = (
+        "TRADE"
+        if prob_up >= PROB_TRADE_THRESHOLD
+        else "NO_TRADE"
+    )
+
+    last = df.iloc[-1]
+
+    result = {
+        "run_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "data_date": last.name.date().isoformat(),
+        "brent_close": last["Brent_Close"],
+        "wti_close": last["WTI_Close"],
+        "prob_up": prob_up,
+        "signal": signal,
+    }
+
+    write_output(result)
+
+# -----------------------
+# Entrypoint
+# -----------------------
 if __name__ == "__main__":
     main()
+
