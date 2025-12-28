@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 oil_price_forecast.py
-CODE A – calm, robust, professional
-
-Brent + WTI + Brent–WTI Spread
+CODE A – robust, calm, professional
+Brent + WTI + Spread
 TXT output only (always overwritten)
 """
 
@@ -27,14 +26,13 @@ def load_prices():
     wti = yf.download(SYMBOL_WTI, start=START_DATE, progress=False)
 
     if brent.empty or wti.empty:
-        raise RuntimeError("Yahoo Finance download failed")
+        raise RuntimeError("Yahoo data download failed")
 
     df = pd.DataFrame(index=brent.index)
     df["Brent_Close"] = brent["Close"]
     df["WTI_Close"] = wti["Close"]
 
-    df = df.dropna()
-    return df
+    return df.dropna()
 
 # =========================
 # SIGNAL LOGIC – CODE A
@@ -42,11 +40,9 @@ def load_prices():
 def build_signal(df: pd.DataFrame):
     df = df.copy()
 
-    # Trend (20 Tage)
     df["Brent_Trend"] = df["Brent_Close"] > df["Brent_Close"].rolling(20).mean()
     df["WTI_Trend"] = df["WTI_Close"] > df["WTI_Close"].rolling(20).mean()
 
-    # Brent–WTI Spread
     df["Spread"] = df["Brent_Close"] - df["WTI_Close"]
     df["Spread_Z"] = (
         (df["Spread"] - df["Spread"].rolling(60).mean())
@@ -56,7 +52,6 @@ def build_signal(df: pd.DataFrame):
     df = df.dropna()
     last = df.iloc[-1]
 
-    # ---- Probability (ruhig, konservativ) ----
     prob_up = 0.50
 
     if last["Brent_Trend"] and last["WTI_Trend"]:
@@ -89,24 +84,25 @@ def build_signal(df: pd.DataFrame):
     }
 
 # =========================
-# OUTPUT (TXT – overwrite)
+# OUTPUT (TXT)
 # =========================
 def write_output_txt(result: dict):
     text = f"""===================================
-        OIL FORECAST – CODE A
+      OIL FORECAST – CODE A
 ===================================
 Run time (UTC): {result['run_time']}
 Data date     : {result['data_date']}
 
 Brent Close   : {result['brent']:.2f}
 WTI Close     : {result['wti']:.2f}
-Brent–WTI Spr.: {result['spread']:.2f}
+Brent-WTI     : {result['spread']:.2f}
 
 Prob UP       : {result['prob_up']:.2%}
 Prob DOWN     : {result['prob_down']:.2%}
 Signal        : {result['signal']}
 ===================================
 """
+
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write(text)
 
