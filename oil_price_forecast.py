@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 oil_price_forecast.py
-CODE A – ruhig, robust, professionell
+CODE A – robust, professional, deterministic
 
 Brent + WTI + Spread
-TXT output (always overwritten)
+TXT output only (always overwritten)
 """
 
 import yfinance as yf
@@ -33,20 +33,20 @@ def load_prices():
     df["Brent_Close"] = brent["Close"]
     df["WTI_Close"] = wti["Close"]
 
-    df = df.dropna()
-    return df
+    return df.dropna()
 
 # =========================
-# SIGNAL LOGIC – CODE A
+# SIGNAL LOGIC (CODE A)
 # =========================
 def build_signal(df: pd.DataFrame):
     df = df.copy()
 
-    # Trend (20 Tage)
+    df["Brent_Return"] = df["Brent_Close"].pct_change()
+    df["WTI_Return"] = df["WTI_Close"].pct_change()
+
     df["Brent_Trend"] = df["Brent_Close"] > df["Brent_Close"].rolling(20).mean()
     df["WTI_Trend"] = df["WTI_Close"] > df["WTI_Close"].rolling(20).mean()
 
-    # Spread
     df["Spread"] = df["Brent_Close"] - df["WTI_Close"]
     df["Spread_Z"] = (
         (df["Spread"] - df["Spread"].rolling(60).mean())
@@ -58,11 +58,9 @@ def build_signal(df: pd.DataFrame):
 
     prob_up = 0.50
 
-    # Trendfilter
     if last["Brent_Trend"] and last["WTI_Trend"]:
         prob_up += 0.07
 
-    # Spread-Regime
     if last["Spread_Z"] > 0.5:
         prob_up += 0.03
     elif last["Spread_Z"] < -0.5:
@@ -90,25 +88,24 @@ def build_signal(df: pd.DataFrame):
     }
 
 # =========================
-# OUTPUT TXT
+# OUTPUT (TXT)
 # =========================
 def write_output_txt(result: dict):
     text = f"""===================================
-     OIL FORECAST – CODE A
+      OIL FORECAST – CODE A
 ===================================
 Run time (UTC): {result['run_time']}
 Data date     : {result['data_date']}
 
 Brent Close   : {result['brent']:.2f}
 WTI Close     : {result['wti']:.2f}
-Brent-WTI     : {result['spread']:.2f}
+Brent–WTI Spd : {result['spread']:.2f}
 
 Prob UP       : {result['prob_up']:.2%}
 Prob DOWN     : {result['prob_down']:.2%}
 Signal        : {result['signal']}
 ===================================
 """
-
     with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -119,7 +116,7 @@ def main():
     df = load_prices()
     result = build_signal(df)
     write_output_txt(result)
-    print(f"[OK] {OUTPUT_TXT} written")
+    print("[OK] oil_forecast_output.txt written")
 
 if __name__ == "__main__":
     main()
