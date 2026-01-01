@@ -12,7 +12,6 @@ One TXT output
 # =======================
 # IMPORTS
 # =======================
-import json
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -41,10 +40,16 @@ DOWN_THRESHOLD = 0.40
 # -------- GAS ----------
 # =======================
 def load_gas_prices():
-    df = yf.download(GAS_SYMBOL, start=START_DATE_GAS, auto_adjust=True, progress=False)
+    df = yf.download(
+        GAS_SYMBOL,
+        start=START_DATE_GAS,
+        auto_adjust=True,
+        progress=False,
+    )
     df = df[["Close"]].rename(columns={"Close": "Gas_Close"})
     df.dropna(inplace=True)
     return df
+
 
 def load_eia_storage():
     try:
@@ -53,6 +58,7 @@ def load_eia_storage():
         return s
     except Exception:
         return None
+
 
 def build_gas_features(price_df, storage_df):
     df = price_df.copy()
@@ -64,13 +70,20 @@ def build_gas_features(price_df, storage_df):
     df["Target"] = (df["ret"].shift(-1) > 0).astype(int)
 
     if storage_df is not None:
-        storage_df["surprise"] = storage_df["Storage"] - storage_df["FiveYearAvg"]
+        storage_df["surprise"] = (
+            storage_df["Storage"] - storage_df["FiveYearAvg"]
+        )
         storage_df["surprise_z"] = (
             (storage_df["surprise"] - storage_df["surprise"].rolling(52).mean())
             / storage_df["surprise"].rolling(52).std()
         )
         storage_df = storage_df[["Date", "surprise_z"]]
-        df = df.merge(storage_df, left_index=True, right_on="Date", how="left")
+        df = df.merge(
+            storage_df,
+            left_index=True,
+            right_on="Date",
+            how="left",
+        )
         df["surprise_z"].ffill(inplace=True)
         df.set_index("Date", inplace=True)
     else:
@@ -79,30 +92,42 @@ def build_gas_features(price_df, storage_df):
     df.dropna(inplace=True)
     return df
 
+
 def train_gas_model(df):
     features = ["trend_5", "trend_20", "vol_10", "surprise_z"]
     X = df[features]
     y = df["Target"]
 
-    tscv = TimeSeriesSplit(5)
+    tscv = TimeSeriesSplit(n_splits=5)
     acc = []
 
     for tr, te in tscv.split(X):
         m = LogisticRegression(max_iter=200)
         m.fit(X.iloc[tr], y.iloc[tr])
-        acc.append(accuracy_score(y.iloc[te], m.predict(X.iloc[te])))
+        acc.append(
+            accuracy_score(y.iloc[te], m.predict(X.iloc[te]))
+        )
 
     model = LogisticRegression(max_iter=200)
     model.fit(X, y)
 
     return model, features, float(np.mean(acc)), float(np.std(acc))
 
+
 # =======================
 # -------- OIL ----------
 # =======================
 def load_oil_prices():
-    brent = yf.download(SYMBOL_BRENT, start=START_DATE_OIL, progress=False)
-    wti = yf.download(SYMBOL_WTI, start=START_DATE_OIL, progress=False)
+    brent = yf.download(
+        SYMBOL_BRENT,
+        start=START_DATE_OIL,
+        progress=False,
+    )
+    wti = yf.download(
+        SYMBOL_WTI,
+        start=START_DATE_OIL,
+        progress=False,
+    )
 
     df = pd.DataFrame(index=brent.index)
     df["Brent_Close"] = brent["Close"]
@@ -110,11 +135,18 @@ def load_oil_prices():
     df.dropna(inplace=True)
     return df
 
+
 def build_oil_signal(df):
     df = df.copy()
 
-    df["Brent_Trend"] = df["Brent_Close"] > df["Brent_Close"].rolling(20).mean()
-    df["WTI_Trend"] = df["WTI_Close"] > df["WTI_Close"].rolling(20).mean()
+    df["Brent_Trend"] = (
+        df["Brent_Close"]
+        > df["Brent_Close"].rolling(20).mean()
+    )
+    df["WTI_Trend"] = (
+        df["WTI_Close"]
+        > df["WTI_Close"].rolling(20).mean()
+    )
 
     df["Spread"] = df["Brent_Close"] - df["WTI_Close"]
     df["Spread_Z"] = (
@@ -126,6 +158,7 @@ def build_oil_signal(df):
     last = df.iloc[-1]
 
     prob_up = 0.50
+
     if last["Brent_Trend"] and last["WTI_Trend"]:
         prob_up += 0.07
 
@@ -134,7 +167,7 @@ def build_oil_signal(df):
     elif last["Spread_Z"] < -0.5:
         prob_up -= 0.03
 
-    prob_up = max(0, min(1, prob_up))
+    prob_up = max(0.0, min(1.0, prob_up))
 
     if prob_up >= 0.57:
         signal = "UP"
@@ -149,29 +182,34 @@ def build_oil_signal(df):
         "wti": float(last["WTI_Close"]),
         "spread": float(last["Spread"]),
         "prob_up": prob_up,
-        "prob_down": 1 - prob_up,
-        "signal": signal
+        "prob_down": 1.0 - prob_up,
+        "signal": signal,
     }
+
 
 # =======================
 # OUTPUT
 # =======================
 def write_output(gas, oil):
-    with open(OUT_TXT, "w") as f:
+    with open(OUT_TXT, "w", encoding="utf-8") as f:
         f.write("===================================\n")
         f.write("   ENERGY FORECAST – CODE A\n")
         f.write("===================================\n")
-        f.write(f"Run time (UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n")
+        f.write(
+            f"Run time (UTC): "
+            f"{datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}\n\n"
+        )
 
-        # GAS
         f.write("--------- NATURAL GAS ---------\n")
         f.write(f"Data date : {gas['date']}\n")
-        f.write(f"Model CV  : {gas['cv_mean']:.2%} ± {gas['cv_std']:.2%}\n")
+        f.write(
+            f"Model CV  : "
+            f"{gas['cv_mean']:.2%} ± {gas['cv_std']:.2%}\n"
+        )
         f.write(f"Prob UP   : {gas['prob_up']:.2%}\n")
         f.write(f"Prob DOWN : {gas['prob_down']:.2%}\n")
         f.write(f"Signal    : {gas['signal']}\n\n")
 
-        # OIL
         f.write("--------- OIL (BRENT / WTI) ---------\n")
         f.write(f"Data date     : {oil['date']}\n")
         f.write(f"Brent Close   : {oil['brent']:.2f}\n")
@@ -182,40 +220,41 @@ def write_output(gas, oil):
         f.write(f"Signal        : {oil['signal']}\n")
         f.write("===================================\n")
 
+
 # =======================
 # MAIN
 # =======================
 def main():
-    # GAS
     gas_prices = load_gas_prices()
     storage = load_eia_storage()
     gas_df = build_gas_features(gas_prices, storage)
+
     model, features, cv_mean, cv_std = train_gas_model(gas_df)
 
     last = gas_df.iloc[-1:]
     prob_up = model.predict_proba(last[features])[0][1]
 
     gas_signal = (
-        "UP" if prob_up >= UP_THRESHOLD else
-        "DOWN" if prob_up <= DOWN_THRESHOLD else
-        "NO_TRADE"
+        "UP" if prob_up >= UP_THRESHOLD
+        else "DOWN" if prob_up <= DOWN_THRESHOLD
+        else "NO_TRADE"
     )
 
     gas_res = {
         "date": last.index[0].date().isoformat(),
         "prob_up": prob_up,
-        "prob_down": 1 - prob_up,
+        "prob_down": 1.0 - prob_up,
         "signal": gas_signal,
         "cv_mean": cv_mean,
-        "cv_std": cv_std
+        "cv_std": cv_std,
     }
 
-    # OIL
     oil_df = load_oil_prices()
     oil_res = build_oil_signal(oil_df)
 
     write_output(gas_res, oil_res)
     print("[OK] Energy forecast written")
+
 
 if __name__ == "__main__":
     main()
