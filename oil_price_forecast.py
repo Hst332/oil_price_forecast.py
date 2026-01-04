@@ -102,13 +102,19 @@ def train_gas_model(df):
     acc = []
 
     for tr, te in tscv.split(X):
-        m = LogisticRegression(max_iter=200)
+        m = LogisticRegression(
+            max_iter=200,
+            class_weight="balanced"
+        )
         m.fit(X.iloc[tr], y.iloc[tr])
         acc.append(
             accuracy_score(y.iloc[te], m.predict(X.iloc[te]))
         )
 
-    model = LogisticRegression(max_iter=200)
+    model = LogisticRegression(
+        max_iter=200,
+        class_weight="balanced"
+    )
     model.fit(X, y)
 
     return model, features, float(np.mean(acc)), float(np.std(acc))
